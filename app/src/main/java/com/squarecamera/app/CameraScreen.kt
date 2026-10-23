@@ -391,6 +391,9 @@ private fun Viewfinder(camera: LifecycleCameraController) {
             factory = { ctx ->
                 PreviewView(ctx).apply {
                     scaleType = PreviewView.ScaleType.FILL_CENTER
+                    // The default (SurfaceView) preview spills past its box when cropped, so 1:1
+                    // looked taller than the photo; this one stays clipped to the box.
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     setController(camera)
                     // Only notes where the finger lifted; the camera itself handles the tap and pinch.
                     setOnTouchListener { _, e ->
