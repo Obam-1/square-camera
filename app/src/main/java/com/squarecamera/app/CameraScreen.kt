@@ -63,6 +63,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -231,7 +232,8 @@ fun CameraScreen(activity: MainActivity) {
                 .fillMaxWidth().aspectRatio(1f)
         }
 
-        Box(viewfinder) {
+        // Clipped: the camera image is scaled to fill the box and would otherwise show past it.
+        Box(viewfinder.clipToBounds()) {
             if (hasPermission) {
                 Viewfinder(controller)
             } else {
