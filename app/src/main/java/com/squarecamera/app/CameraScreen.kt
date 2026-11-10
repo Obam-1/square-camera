@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -87,11 +88,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 private val Chip = Color.Black.copy(alpha = 0.45f)
 private val Accent = Color(0xFFC2E7FF)
 private val TopBarHeight = 56.dp
+private const val TAP_FOCUS_HOLD_MS = 5_000L
+private const val FOCUS_TIMEOUT_MS = 1_000L
+
+/** Where to focus before a shot: the last tap if it was recent, else the middle of the frame. */
+private class FocusTarget {
+    var view: PreviewView? = null
+    var tap: Offset? = null
+    var tapAt = 0L
+}
 
 /** The newest photo, for the round thumbnail that opens it in Google Photos. */
 private class Shot(val uri: Uri, val thumb: ImageBitmap?)
@@ -157,9 +168,9 @@ fun CameraScreen(activity: MainActivity) {
     var countdownJob by remember { mutableStateOf<Job?>(null) }
     val dim = remember { Animatable(0f) }
 
+    val focusTarget = remember { FocusTarget() }
+
     fun capture() {
-        if (capturing || !hasPermission) return
-        capturing = true
         val shotRatio = ratio.portrait
         val mirror = front
         sound.play(MediaActionSound.SHUTTER_CLICK)
@@ -198,6 +209,36 @@ fun CameraScreen(activity: MainActivity) {
         })
     }
 
+    /**
+     * Focuses (and sets brightness) on what's in the frame, then takes the photo, like the Pixel
+     * camera. If focusing takes too long the photo is taken anyway, so the shutter never stalls.
+     */
+    fun focusAndCapture() {
+        if (capturing || !hasPermission) return
+        capturing = true
+        val view = focusTarget.view
+        val cameraControl = controller.cameraControl
+        if (view == null || cameraControl == null || view.width == 0) return capture()
+
+        val tap = focusTarget.tap?.takeIf { System.currentTimeMillis() - focusTarget.tapAt < TAP_FOCUS_HOLD_MS }
+        val point = view.meteringPointFactory.createPoint(tap?.x ?: (view.width / 2f), tap?.y ?: (view.height / 2f))
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+
+        var taken = false
+        fun takeOnce() {
+            if (taken) return
+            taken = true
+            capture()
+        }
+        cameraControl.startFocusAndMetering(action).addListener({ takeOnce() }, mainExecutor)
+        scope.launch {
+            delay(FOCUS_TIMEOUT_MS)
+            takeOnce()
+        }
+    }
+
     /** The shutter: straight away, or after the self-timer. Pressing it again stops the timer. */
     fun shutter() {
         if (countdown != null) {
@@ -205,14 +246,14 @@ fun CameraScreen(activity: MainActivity) {
             countdown = null
             return
         }
-        if (timer == 0) return capture()
+        if (timer == 0) return focusAndCapture()
         countdownJob = scope.launch {
             for (s in timer downTo 1) {
                 countdown = s
                 delay(1000)
             }
             countdown = null
-            capture()
+            focusAndCapture()
         }
     }
 
@@ -235,7 +276,7 @@ fun CameraScreen(activity: MainActivity) {
         // Clipped: the camera image is scaled to fill the box and would otherwise show past it.
         Box(viewfinder.clipToBounds()) {
             if (hasPermission) {
-                Viewfinder(controller)
+                Viewfinder(controller, focusTarget)
             } else {
                 Column(
                     Modifier.align(Alignment.Center).padding(32.dp),
@@ -370,7 +411,7 @@ fun CameraScreen(activity: MainActivity) {
 /** The live preview, with tap to focus (and a focus ring where you tap) and pinch to zoom. */
 @SuppressLint("ClickableViewAccessibility")
 @Composable
-private fun Viewfinder(camera: LifecycleCameraController) {
+private fun Viewfinder(camera: LifecycleCameraController, focusTarget: FocusTarget) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var touch by remember { mutableStateOf(Offset.Zero) }
     var ring by remember { mutableStateOf<Offset?>(null) }
@@ -378,7 +419,12 @@ private fun Viewfinder(camera: LifecycleCameraController) {
 
     LaunchedEffect(focusState) {
         when (focusState) {
-            CameraController.TAP_TO_FOCUS_STARTED -> ring = touch
+            CameraController.TAP_TO_FOCUS_STARTED -> {
+                ring = touch
+                // A tap picks what the next photo focuses on, for a few seconds.
+                focusTarget.tap = touch
+                focusTarget.tapAt = System.currentTimeMillis()
+            }
             CameraController.TAP_TO_FOCUS_FOCUSED,
             CameraController.TAP_TO_FOCUS_NOT_FOCUSED,
             CameraController.TAP_TO_FOCUS_FAILED -> {
@@ -402,6 +448,7 @@ private fun Viewfinder(camera: LifecycleCameraController) {
                         if (e.action == MotionEvent.ACTION_UP) touch = Offset(e.x, e.y)
                         false
                     }
+                    focusTarget.view = this
                 }
             },
             modifier = Modifier.fillMaxSize(),
